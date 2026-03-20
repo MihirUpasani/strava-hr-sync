@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "strava-hr-sync"
+version = "0.1.0"
+description = "Sync Fitbit heart rate data into Strava treadmill activities"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Mihir Upasani" }]
+dependencies = [
+    "httpx>=0.27",
+    "click>=8.1",
+    "python-dateutil>=2.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-httpx>=0.30",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+strava-hr-sync = "strava_hr_sync.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strava_hr_sync"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
