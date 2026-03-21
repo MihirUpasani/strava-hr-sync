@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,11 +34,19 @@ def _interpolate_hr(
     best_sample = None
     best_delta = float("inf")
 
+    # Normalize target to UTC for consistent comparison
+    if target_time.tzinfo is not None:
+        target_utc = target_time.astimezone(timezone.utc)
+    else:
+        target_utc = target_time.replace(tzinfo=timezone.utc)
+
     for sample in hr_samples:
-        # Make both timezone-naive for comparison
-        sample_time = sample.time.replace(tzinfo=None) if sample.time.tzinfo else sample.time
-        target_naive = target_time.replace(tzinfo=None) if target_time.tzinfo else target_time
-        delta = abs((sample_time - target_naive).total_seconds())
+        # Normalize sample to UTC
+        if sample.time.tzinfo is not None:
+            sample_utc = sample.time.astimezone(timezone.utc)
+        else:
+            sample_utc = sample.time.replace(tzinfo=timezone.utc)
+        delta = abs((sample_utc - target_utc).total_seconds())
         if delta < best_delta:
             best_delta = delta
             best_sample = sample
@@ -158,9 +167,6 @@ def build_tcx(
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
 
-    # Serialize to string
-    import io
-
     buf = io.BytesIO()
     tree.write(buf, xml_declaration=True, encoding="UTF-8")
     return buf.getvalue().decode("UTF-8")
@@ -189,9 +195,16 @@ def build_tcx_minimal(
 
     # Use HR sample timestamps to create time offsets
     for i, sample in enumerate(hr_samples):
-        sample_time = sample.time.replace(tzinfo=None) if sample.time.tzinfo else sample.time
-        start_naive = activity_start.replace(tzinfo=None) if activity_start.tzinfo else activity_start
-        offset = (sample_time - start_naive).total_seconds()
+        # Normalize both to UTC for consistent comparison
+        if sample.time.tzinfo is not None:
+            sample_utc = sample.time.astimezone(timezone.utc)
+        else:
+            sample_utc = sample.time.replace(tzinfo=timezone.utc)
+        if activity_start.tzinfo is not None:
+            start_utc = activity_start.astimezone(timezone.utc)
+        else:
+            start_utc = activity_start.replace(tzinfo=timezone.utc)
+        offset = (sample_utc - start_utc).total_seconds()
         if 0 <= offset <= elapsed_seconds + 60:
             time_stream.append(int(offset))
             # Linear interpolation of distance

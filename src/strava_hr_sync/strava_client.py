@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -114,6 +116,7 @@ def get_treadmill_runs_without_hr(
         if a.trainer
         and a.sport_type in ("Run", "VirtualRun")
         and not a.has_heartrate
+        and not a.name.startswith("[DELETE ME]")
     ]
 
 
@@ -152,6 +155,7 @@ def upload_tcx(
     description: str | None = None,
     trainer: bool = True,
     data_type: str = "tcx",
+    external_id: str | None = None,
 ) -> int:
     """Upload a TCX file and return the new activity ID.
 
@@ -166,6 +170,8 @@ def upload_tcx(
         data["name"] = name
     if description:
         data["description"] = description
+    if external_id:
+        data["external_id"] = external_id
 
     resp = _request(
         client,
@@ -226,32 +232,56 @@ def update_activity_metadata(
     return resp.json()
 
 
-def seamless_replace(
+PENDING_DIR = Path.home() / ".config" / "strava-hr-sync" / "pending"
+
+
+def _save_pending(original_id: int, detail: dict[str, Any], tcx_content: str) -> _Path:
+    """Save a TCX file and metadata for later upload after the user deletes the original."""
+    PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    tcx_path = PENDING_DIR / f"{original_id}.tcx"
+    meta_path = PENDING_DIR / f"{original_id}.json"
+    tcx_path.write_text(tcx_content)
+    meta_path.write_text(json.dumps(detail, default=str, indent=2))
+    return tcx_path
+
+
+def load_pending() -> list[tuple[int, str, dict[str, Any]]]:
+    """Load all pending TCX uploads. Returns list of (original_id, tcx, metadata)."""
+    if not PENDING_DIR.exists():
+        return []
+    pending = []
+    for tcx_path in sorted(PENDING_DIR.glob("*.tcx")):
+        original_id = int(tcx_path.stem)
+        meta_path = PENDING_DIR / f"{original_id}.json"
+        if meta_path.exists():
+            tcx_content = tcx_path.read_text()
+            detail = json.loads(meta_path.read_text())
+            pending.append((original_id, tcx_content, detail))
+    return pending
+
+
+def clear_pending(original_id: int) -> None:
+    """Remove pending files for a successfully uploaded activity."""
+    for ext in (".tcx", ".json"):
+        path = PENDING_DIR / f"{original_id}{ext}"
+        path.unlink(missing_ok=True)
+
+
+def _upload_and_restore(
     client: httpx.Client,
-    original: StravaActivity,
     tcx_content: str,
+    detail: dict[str, Any],
 ) -> int:
-    """Delete original activity and upload enriched TCX, restoring metadata.
-
-    Returns the new activity ID.
-    """
-    # Capture full metadata before deletion
-    detail = get_activity_detail(client, original.id)
-
-    # Delete the old activity
-    delete_activity(client, original.id)
-
-    # Upload the HR-enriched version
+    """Upload a TCX file and restore the original activity's metadata."""
     new_id = upload_tcx(
         client,
         tcx_content,
         activity_type="run",
-        name=detail.get("name", original.name),
+        name=detail.get("name", ""),
         description=detail.get("description", ""),
         trainer=detail.get("trainer", True),
     )
 
-    # Restore all metadata
     update_activity_metadata(
         client,
         new_id,
@@ -264,4 +294,50 @@ def seamless_replace(
         hide_from_home=detail.get("hide_from_home", False),
     )
 
+    return new_id
+
+
+def seamless_replace(
+    client: httpx.Client,
+    original: StravaActivity,
+    tcx_content: str,
+) -> int | None:
+    """Replace an activity with an HR-enriched version.
+
+    Tries to delete the original and upload the new version. If deletion
+    fails (common for non-approved Strava apps), saves the TCX locally
+    and marks the original for manual deletion.
+
+    Returns the new activity ID, or None if the upload is pending.
+    """
+    detail = get_activity_detail(client, original.id)
+
+    # Try to delete the original first
+    try:
+        delete_activity(client, original.id)
+    except Exception:
+        # Can't delete — save for later and mark the original
+        _save_pending(original.id, detail, tcx_content)
+        old_name = detail.get("name", original.name)
+        update_activity_metadata(
+            client,
+            original.id,
+            name=f"[DELETE ME] {old_name}",
+            description="Replaced by HR-enriched version. Delete this, then re-run sync.",
+            hide_from_home=True,
+        )
+        return None
+
+    return _upload_and_restore(client, tcx_content, detail)
+
+
+def upload_pending_tcx(
+    client: httpx.Client,
+    original_id: int,
+    tcx_content: str,
+    detail: dict[str, Any],
+) -> int:
+    """Upload a previously saved pending TCX file and restore metadata."""
+    new_id = _upload_and_restore(client, tcx_content, detail)
+    clear_pending(original_id)
     return new_id

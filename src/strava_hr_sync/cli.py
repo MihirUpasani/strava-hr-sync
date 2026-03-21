@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
-import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 import click
+import httpx
 
 from . import __version__
 
@@ -48,6 +48,101 @@ def auth_fitbit(client_id: str, client_secret: str):
     authenticate_fitbit(client_id, client_secret)
 
 
+def _process_pending(strava: httpx.Client) -> None:
+    """Upload any pending TCX files from previous runs."""
+    from .strava_client import load_pending, upload_pending_tcx
+
+    pending = load_pending()
+    if not pending:
+        return
+
+    click.echo(f"Found {len(pending)} pending upload(s) from previous runs.\n")
+    uploaded = 0
+    for original_id, tcx_content, detail in pending:
+        name = detail.get("name", f"Activity {original_id}")
+        try:
+            new_id = upload_pending_tcx(strava, original_id, tcx_content, detail)
+            click.echo(f"  Uploaded: {name} -> new ID: {new_id}")
+            uploaded += 1
+        except RuntimeError as e:
+            if "duplicate" in str(e).lower():
+                click.echo(f"  {name}: still a duplicate — delete the "
+                           f"[DELETE ME] activity on Strava first")
+            else:
+                click.echo(f"  {name}: upload failed — {e}")
+    if uploaded:
+        click.echo(f"\n{uploaded} pending upload(s) completed!")
+    click.echo()
+
+
+def _process_matches(
+    strava: httpx.Client,
+    fitbit: httpx.Client,
+    matches: list,
+    use_minimal_fallback: bool = False,
+) -> tuple[int, int, int]:
+    """Process matched activity pairs: fetch HR, build TCX, replace.
+
+    Returns (replaced, pending, failed) counts.
+    """
+    from .fitbit_client import get_hr_for_activity
+    from .merger import build_tcx, build_tcx_minimal
+    from .strava_client import get_activity_streams, seamless_replace
+
+    replaced = 0
+    pending_count = 0
+    failed = 0
+
+    for i, m in enumerate(matches, 1):
+        label = f"[{i}/{len(matches)}] " if len(matches) > 1 else ""
+        click.echo(f"\n{label}Processing: {m.strava.name}...")
+
+        try:
+            # Get Strava streams
+            try:
+                streams = get_activity_streams(strava, m.strava.id)
+            except Exception:
+                streams = {}
+
+            # Get Fitbit HR
+            hr_samples = get_hr_for_activity(fitbit, m.fitbit)
+            click.echo(f"  Got {len(hr_samples)} HR samples from Fitbit")
+
+            if not hr_samples:
+                click.echo("  Skipping — no HR data available from Fitbit")
+                failed += 1
+                continue
+
+            # Build TCX
+            if streams and "time" in streams:
+                tcx = build_tcx(m.strava.start_date, streams, hr_samples)
+            elif use_minimal_fallback:
+                tcx = build_tcx_minimal(
+                    m.strava.start_date,
+                    m.strava.elapsed_time,
+                    m.strava.distance,
+                    hr_samples,
+                )
+            else:
+                tcx = build_tcx(m.strava.start_date, streams, hr_samples)
+
+            # Seamless replace
+            new_id = seamless_replace(strava, m.strava, tcx)
+            if new_id:
+                click.echo(f"  Done! New activity ID: {new_id}")
+                replaced += 1
+            else:
+                click.echo(f"  Saved for later — delete '[DELETE ME] {m.strava.name}' "
+                           f"on Strava, then re-run sync")
+                pending_count += 1
+
+        except Exception as e:
+            click.echo(f"  Error: {e}", err=True)
+            failed += 1
+
+    return replaced, pending_count, failed
+
+
 @cli.command()
 @click.option("--dry-run", is_flag=True, help="Preview changes without modifying anything")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompts")
@@ -55,20 +150,20 @@ def auth_fitbit(client_id: str, client_secret: str):
 def sync(dry_run: bool, yes: bool, days: int):
     """Find and sync recent treadmill activities missing HR data."""
     from .auth import get_fitbit_client, get_strava_client
-    from .fitbit_client import get_hr_for_activity
     from .fitbit_client import list_activities as fitbit_list
     from .matcher import match_activities
-    from .merger import build_tcx
-    from .strava_client import get_activity_streams, get_treadmill_runs_without_hr, seamless_replace
+    from .strava_client import get_treadmill_runs_without_hr
 
     after = datetime.now(timezone.utc) - timedelta(days=days)
-
-    click.echo(f"Looking for treadmill runs without HR in the last {days} days...\n")
 
     strava = get_strava_client()
     fitbit = get_fitbit_client()
 
     try:
+        _process_pending(strava)
+
+        click.echo(f"Looking for treadmill runs without HR in the last {days} days...\n")
+
         strava_activities = get_treadmill_runs_without_hr(strava, after=after)
         if not strava_activities:
             click.echo("No treadmill runs without HR data found on Strava.")
@@ -100,28 +195,14 @@ def sync(dry_run: bool, yes: bool, days: int):
         if not yes:
             click.confirm("\nProceed with syncing these activities?", abort=True)
 
-        for m in matches:
-            click.echo(f"\nProcessing: {m.strava.name}...")
+        replaced, pending_count, _ = _process_matches(strava, fitbit, matches)
 
-            # Get Strava streams
-            streams = get_activity_streams(strava, m.strava.id)
-
-            # Get Fitbit HR
-            hr_samples = get_hr_for_activity(fitbit, m.fitbit)
-            click.echo(f"  Got {len(hr_samples)} HR samples from Fitbit")
-
-            if not hr_samples:
-                click.echo("  Skipping — no HR data available from Fitbit")
-                continue
-
-            # Build merged TCX
-            tcx = build_tcx(m.strava.start_date, streams, hr_samples)
-
-            # Seamless replace
-            new_id = seamless_replace(strava, m.strava, tcx)
-            click.echo(f"  Done! New activity ID: {new_id}")
-
-        click.echo(f"\nSync complete! {len(matches)} activity(ies) updated with HR data.")
+        click.echo(f"\nSync complete!")
+        if replaced:
+            click.echo(f"  {replaced} activity(ies) replaced with HR data.")
+        if pending_count:
+            click.echo(f"  {pending_count} activity(ies) pending — delete the "
+                       f"'[DELETE ME]' activities on Strava, then re-run sync to upload.")
     finally:
         strava.close()
         fitbit.close()
@@ -145,11 +226,9 @@ def sync(dry_run: bool, yes: bool, days: int):
 def backfill(dry_run: bool, yes: bool, after: datetime | None, before: datetime | None):
     """Backfill HR data for all historical treadmill runs."""
     from .auth import get_fitbit_client, get_strava_client
-    from .fitbit_client import get_hr_for_activity
     from .fitbit_client import list_activities as fitbit_list
     from .matcher import match_activities
-    from .merger import build_tcx, build_tcx_minimal
-    from .strava_client import get_activity_streams, get_treadmill_runs_without_hr, seamless_replace
+    from .strava_client import get_treadmill_runs_without_hr
 
     click.echo("Backfilling HR data for historical treadmill runs...\n")
 
@@ -162,6 +241,8 @@ def backfill(dry_run: bool, yes: bool, after: datetime | None, before: datetime 
     fitbit = get_fitbit_client()
 
     try:
+        _process_pending(strava)
+
         strava_activities = get_treadmill_runs_without_hr(strava, after=after, before=before)
         if not strava_activities:
             click.echo("No treadmill runs without HR data found on Strava.")
@@ -190,52 +271,15 @@ def backfill(dry_run: bool, yes: bool, after: datetime | None, before: datetime 
         if not yes:
             click.confirm(f"\nProceed with backfilling {len(matches)} activities?", abort=True)
 
-        success = 0
-        failed = 0
+        replaced, pending_count, failed = _process_matches(
+            strava, fitbit, matches, use_minimal_fallback=True,
+        )
 
-        for i, m in enumerate(matches, 1):
-            click.echo(f"\n[{i}/{len(matches)}] Processing: {m.strava.name} "
-                        f"({m.strava.start_date.strftime('%Y-%m-%d')})...")
-
-            try:
-                # Try to get Strava streams (may fail for old activities)
-                try:
-                    streams = get_activity_streams(strava, m.strava.id)
-                except Exception:
-                    streams = {}
-
-                # Get Fitbit HR
-                hr_samples = get_hr_for_activity(fitbit, m.fitbit)
-                click.echo(f"  Got {len(hr_samples)} HR samples from Fitbit")
-
-                if not hr_samples:
-                    click.echo("  Skipping — no HR data available from Fitbit")
-                    failed += 1
-                    continue
-
-                # Build TCX
-                if streams and "time" in streams:
-                    tcx = build_tcx(m.strava.start_date, streams, hr_samples)
-                else:
-                    tcx = build_tcx_minimal(
-                        m.strava.start_date,
-                        m.strava.elapsed_time,
-                        m.strava.distance,
-                        hr_samples,
-                    )
-
-                # Seamless replace
-                new_id = seamless_replace(strava, m.strava, tcx)
-                click.echo(f"  Done! New activity ID: {new_id}")
-                success += 1
-
-            except Exception as e:
-                click.echo(f"  Error: {e}", err=True)
-                failed += 1
-                continue
-
-        click.echo(f"\nBackfill complete! {success} succeeded, {failed} failed "
+        click.echo(f"\nBackfill complete! {replaced} succeeded, {failed} failed "
                     f"out of {len(matches)} matched.")
+        if pending_count:
+            click.echo(f"  {pending_count} activity(ies) pending — delete the "
+                       f"'[DELETE ME]' activities on Strava, then re-run to upload.")
     finally:
         strava.close()
         fitbit.close()
@@ -256,8 +300,6 @@ def status():
                 athlete = tokens["athlete"]
                 click.echo(f"  User: {athlete.get('firstname', '')} {athlete.get('lastname', '')}")
             if "expires_at" in tokens:
-                import time
-
                 exp = datetime.fromtimestamp(tokens["expires_at"], tz=timezone.utc)
                 if tokens["expires_at"] < time.time():
                     click.echo(f"  Token: Expired (will auto-refresh)")

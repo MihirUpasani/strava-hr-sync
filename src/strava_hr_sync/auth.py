@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.server
 import json
 import os
 import secrets
 import threading
+import time
 import urllib.parse
 import webbrowser
 from pathlib import Path
@@ -46,14 +48,6 @@ def load_tokens(service: str) -> dict[str, Any] | None:
     if not path.exists():
         return None
     return json.loads(path.read_text())
-
-
-def _generate_pkce() -> tuple[str, str]:
-    """Generate PKCE code_verifier and code_challenge (S256)."""
-    verifier = secrets.token_urlsafe(64)
-    digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    challenge = secrets.base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return verifier, challenge
 
 
 def _wait_for_auth_code() -> str:
@@ -109,7 +103,7 @@ def authenticate_strava(client_id: str, client_secret: str) -> dict[str, Any]:
         "redirect_uri": REDIRECT_URI,
         "response_type": "code",
         "scope": STRAVA_SCOPES,
-        "approval_prompt": "auto",
+        "approval_prompt": "force",
     }
     auth_url = f"{STRAVA_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
@@ -144,8 +138,6 @@ def authenticate_fitbit(client_id: str, client_secret: str) -> dict[str, Any]:
     """Run Fitbit OAuth2 PKCE flow. Opens browser, captures callback, returns tokens."""
     verifier = secrets.token_urlsafe(64)
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
-    import base64
-
     challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
     params = {
@@ -176,6 +168,7 @@ def authenticate_fitbit(client_id: str, client_secret: str) -> dict[str, Any]:
             "redirect_uri": REDIRECT_URI,
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
+        auth=(client_id, client_secret),
     )
     resp.raise_for_status()
     tokens = resp.json()
@@ -215,6 +208,7 @@ def refresh_fitbit_token(tokens: dict[str, Any]) -> dict[str, Any]:
             "refresh_token": tokens["refresh_token"],
         },
         headers={"Content-Type": "application/x-www-form-urlencoded"},
+        auth=(tokens["client_id"], tokens["client_secret"]),
     )
     resp.raise_for_status()
     new_tokens = resp.json()
@@ -222,33 +216,6 @@ def refresh_fitbit_token(tokens: dict[str, Any]) -> dict[str, Any]:
     new_tokens["client_secret"] = tokens["client_secret"]
     _save_tokens("fitbit", new_tokens)
     return new_tokens
-
-
-def get_strava_headers() -> dict[str, str]:
-    """Get authenticated headers for Strava API calls, refreshing if needed."""
-    tokens = load_tokens("strava")
-    if tokens is None:
-        raise RuntimeError("Not authenticated with Strava. Run: strava-hr-sync auth strava")
-
-    import time
-
-    if tokens.get("expires_at", 0) < time.time():
-        tokens = refresh_strava_token(tokens)
-
-    return {"Authorization": f"Bearer {tokens['access_token']}"}
-
-
-def get_fitbit_headers() -> dict[str, str]:
-    """Get authenticated headers for Fitbit API calls, refreshing if needed."""
-    tokens = load_tokens("fitbit")
-    if tokens is None:
-        raise RuntimeError("Not authenticated with Fitbit. Run: strava-hr-sync auth fitbit")
-
-    # Fitbit tokens don't include expires_at easily, but we try refresh on 401
-    return {
-        "Authorization": f"Bearer {tokens['access_token']}",
-        "_refresh_tokens": json.dumps(tokens),  # Stash for refresh logic
-    }
 
 
 def get_fitbit_client() -> httpx.Client:
@@ -271,8 +238,6 @@ def get_fitbit_client() -> httpx.Client:
 
 def get_strava_client() -> httpx.Client:
     """Create an httpx Client with Strava auth and auto-refresh."""
-    import time
-
     tokens = load_tokens("strava")
     if tokens is None:
         raise RuntimeError("Not authenticated with Strava. Run: strava-hr-sync auth strava")
