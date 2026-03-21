@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "strava-hr-sync"
 version = "0.1.0"
-description = "Sync Fitbit heart rate data into Strava treadmill activities"
+description = "Sync Fitbit heart rate data into Strava activities"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

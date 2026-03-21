@@ -103,18 +103,17 @@ def list_activities(
     return activities
 
 
-def get_treadmill_runs_without_hr(
+def get_runs_without_hr(
     client: httpx.Client,
     after: datetime | None = None,
     before: datetime | None = None,
 ) -> list[StravaActivity]:
-    """Get treadmill runs (trainer=true, type=Run) that lack heart rate data."""
+    """Get runs that lack heart rate data (candidates for Fitbit HR merge)."""
     all_activities = list_activities(client, after=after, before=before)
     return [
         a
         for a in all_activities
-        if a.trainer
-        and a.sport_type in ("Run", "VirtualRun")
+        if a.sport_type in ("Run", "VirtualRun")
         and not a.has_heartrate
         and not a.name.startswith("[DELETE ME]")
     ]

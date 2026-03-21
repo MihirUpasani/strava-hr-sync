@@ -152,7 +152,7 @@ def sync(dry_run: bool, yes: bool, days: int):
     from .auth import get_fitbit_client, get_strava_client
     from .fitbit_client import list_activities as fitbit_list
     from .matcher import match_activities
-    from .strava_client import get_treadmill_runs_without_hr
+    from .strava_client import get_runs_without_hr
 
     after = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -162,14 +162,14 @@ def sync(dry_run: bool, yes: bool, days: int):
     try:
         _process_pending(strava)
 
-        click.echo(f"Looking for treadmill runs without HR in the last {days} days...\n")
+        click.echo(f"Looking for runs without HR in the last {days} days...\n")
 
-        strava_activities = get_treadmill_runs_without_hr(strava, after=after)
+        strava_activities = get_runs_without_hr(strava, after=after)
         if not strava_activities:
-            click.echo("No treadmill runs without HR data found on Strava.")
+            click.echo("No runs without HR data found on Strava.")
             return
 
-        click.echo(f"Found {len(strava_activities)} Strava treadmill run(s) without HR:")
+        click.echo(f"Found {len(strava_activities)} Strava run(s) without HR:")
         for a in strava_activities:
             click.echo(f"  - {a.name} ({a.start_date.strftime('%Y-%m-%d %H:%M')}, "
                         f"{a.elapsed_time // 60}min, {a.distance:.0f}m)")
@@ -228,9 +228,9 @@ def backfill(dry_run: bool, yes: bool, after: datetime | None, before: datetime 
     from .auth import get_fitbit_client, get_strava_client
     from .fitbit_client import list_activities as fitbit_list
     from .matcher import match_activities
-    from .strava_client import get_treadmill_runs_without_hr
+    from .strava_client import get_runs_without_hr
 
-    click.echo("Backfilling HR data for historical treadmill runs...\n")
+    click.echo("Backfilling HR data for historical runs...\n")
 
     if after:
         after = after.replace(tzinfo=timezone.utc)
@@ -243,12 +243,12 @@ def backfill(dry_run: bool, yes: bool, after: datetime | None, before: datetime 
     try:
         _process_pending(strava)
 
-        strava_activities = get_treadmill_runs_without_hr(strava, after=after, before=before)
+        strava_activities = get_runs_without_hr(strava, after=after, before=before)
         if not strava_activities:
-            click.echo("No treadmill runs without HR data found on Strava.")
+            click.echo("No runs without HR data found on Strava.")
             return
 
-        click.echo(f"Found {len(strava_activities)} Strava treadmill run(s) without HR.\n")
+        click.echo(f"Found {len(strava_activities)} Strava run(s) without HR.\n")
 
         fitbit_activities = fitbit_list(fitbit, after=after, before=before)
         click.echo(f"Found {len(fitbit_activities)} Fitbit activities.\n")

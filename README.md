@@ -1,13 +1,13 @@
 # strava-hr-sync
 
-Sync Fitbit heart rate data into Strava treadmill activities.
+Sync Fitbit heart rate data into Strava activities.
 
 ## The Problem
 
-When you do structured treadmill runs and track them with both Runna and Fitbit,
-the heart rate data captured by your Fitbit doesn't make it to Strava. This means
-your indoor runs show up on Strava without HR data, which breaks your fitness
-score, relative effort, and HR zone distribution.
+When you track runs with both Runna (or another app) and Fitbit,
+the heart rate data captured by your Fitbit doesn't always make it to Strava.
+Runs without HR data break your fitness score, relative effort, and HR zone
+distribution.
 
 ## The Solution
 
@@ -18,7 +18,7 @@ data.
 
 ## How It Works
 
-1. **Discover** — Finds Strava treadmill runs missing heart rate data
+1. **Discover** — Finds Strava runs missing heart rate data
 2. **Match** — Correlates them with Fitbit activity logs by time overlap
 3. **Merge** — Pulls 1-second resolution HR from Fitbit's Intraday API, merges
    with Strava's existing activity streams into a TCX file
@@ -69,14 +69,14 @@ strava-hr-sync auth fitbit
 ## Usage
 
 ```bash
-# Sync recent treadmill runs (last 30 days)
+# Sync recent runs missing HR (last 30 days)
 strava-hr-sync sync --dry-run    # preview first
 strava-hr-sync sync --yes        # do it
 
 # Customize the lookback window
 strava-hr-sync sync --days 7
 
-# Backfill all historical treadmill runs
+# Backfill all historical runs
 strava-hr-sync backfill --dry-run
 strava-hr-sync backfill --after 2024-01-01 --before 2025-01-01
 
