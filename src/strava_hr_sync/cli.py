@@ -79,7 +79,6 @@ def _process_matches(
     strava: httpx.Client,
     fitbit: httpx.Client,
     matches: list,
-    use_minimal_fallback: bool = False,
 ) -> tuple[int, int, int]:
     """Process matched activity pairs: fetch HR, build TCX, replace.
 
@@ -116,15 +115,13 @@ def _process_matches(
             # Build TCX
             if streams and "time" in streams:
                 tcx = build_tcx(m.strava.start_date, streams, hr_samples)
-            elif use_minimal_fallback:
+            else:
                 tcx = build_tcx_minimal(
                     m.strava.start_date,
                     m.strava.elapsed_time,
                     m.strava.distance,
                     hr_samples,
                 )
-            else:
-                tcx = build_tcx(m.strava.start_date, streams, hr_samples)
 
             # Seamless replace
             new_id = seamless_replace(strava, m.strava, tcx)
@@ -272,7 +269,7 @@ def backfill(dry_run: bool, yes: bool, after: datetime | None, before: datetime 
             click.confirm(f"\nProceed with backfilling {len(matches)} activities?", abort=True)
 
         replaced, pending_count, failed = _process_matches(
-            strava, fitbit, matches, use_minimal_fallback=True,
+            strava, fitbit, matches,
         )
 
         click.echo(f"\nBackfill complete! {replaced} succeeded, {failed} failed "
